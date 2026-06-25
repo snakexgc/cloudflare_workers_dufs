@@ -51,6 +51,9 @@ const IFRAME_FORMATS = [
 ];
 
 const MAX_SUBPATHS_COUNT = 1000;
+// Keep browser PUT uploads small enough for the Worker CPU budget. Larger
+// files use R2 multipart upload with 16 MiB parts.
+const MULTIPART_UPLOAD_THRESHOLD = 16 * 1024 * 1024;
 
 const ICONS = {
   dir: `<svg height="16" viewBox="0 0 14 16" width="14"><path fill-rule="evenodd" d="M13 4H7V3c0-.66-.31-1-1-1H1c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1V5c0-.55-.45-1-1-1zM6 4H1V3h5v1z"></path></svg>`,
@@ -215,6 +218,11 @@ class Uploader {
   ajax() {
     const { url } = this;
 
+    if (this.file.size > MULTIPART_UPLOAD_THRESHOLD) {
+      this.multipartUpload().catch(error => this.fail(error.message));
+      return;
+    }
+
     this.uploaded = 0;
     this.lastUptime = Date.now();
 
@@ -245,6 +253,11 @@ class Uploader {
   }
 
   async retry() {
+    if (this.file.size > MULTIPART_UPLOAD_THRESHOLD) {
+      this.uploaded = 0;
+      this.ajax();
+      return;
+    }
     const { url } = this;
     let res = await fetch(url, {
       method: "HEAD",
@@ -256,6 +269,78 @@ class Uploader {
     }
     this.uploadOffset = uploadOffset;
     this.ajax();
+  }
+
+  multipartUrl(action, params = {}) {
+    const url = new URL(this.url, location.href);
+    url.searchParams.set("__dufs_multipart", action);
+    for (const [key, value] of Object.entries(params)) {
+      url.searchParams.set(key, value);
+    }
+    return url;
+  }
+
+  async multipartUpload() {
+    const startedAt = Date.now();
+    let session = null;
+    try {
+      const startRes = await fetch(this.multipartUrl("start"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          size: this.file.size,
+          content_type: this.file.type || null,
+        }),
+      });
+      await assertResOK(startRes);
+      const started = await startRes.json();
+      session = started.session;
+      const partSize = started.part_size;
+      if (!session || !partSize) throw new Error("Invalid multipart upload session");
+
+      const partCount = Math.ceil(this.file.size / partSize);
+      const parts = [];
+      for (let index = 0; index < partCount; index++) {
+        const start = index * partSize;
+        const end = Math.min(start + partSize, this.file.size);
+        const partRes = await fetch(this.multipartUrl("part", {
+          session,
+          partNumber: String(index + 1),
+        }), {
+          method: "PUT",
+          body: this.file.slice(start, end),
+        });
+        await assertResOK(partRes);
+        parts.push(await partRes.json());
+        this.uploaded = end;
+        this.multipartProgress(startedAt, index + 1, partCount);
+      }
+
+      const completeRes = await fetch(this.multipartUrl("complete"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ session, parts }),
+      });
+      await assertResOK(completeRes);
+      this.complete();
+    } catch (error) {
+      if (session) await this.abortMultipart(session);
+      throw error;
+    }
+  }
+
+  async abortMultipart(session) {
+    try {
+      await fetch(this.multipartUrl("abort", { session }), { method: "POST" });
+    } catch { }
+  }
+
+  multipartProgress(startedAt, completedParts, partCount) {
+    const elapsed = Math.max((Date.now() - startedAt) / 1000, 0.001);
+    const [speedValue, speedUnit] = formatFileSize(this.uploaded / elapsed);
+    const percent = formatPercent((this.uploaded / this.file.size) * 100);
+    this.$uploadStatus.textContent =
+      `Part ${completedParts}/${partCount} · ${percent} · ${speedValue} ${speedUnit}/s`;
   }
 
   progress(event) {
@@ -797,25 +882,29 @@ async function saveChange() {
 
 async function checkAuth(variant) {
   if (!DATA.auth) return;
-  const qs = variant ? `?${variant}` : "";
-  const res = await fetch(baseUrl() + qs, {
-    method: "CHECKAUTH",
-  });
+  // Cloudflare Workers rejects arbitrary HTTP methods such as CHECKAUTH before
+  // the request reaches the Worker. Use a standard POST with a reserved query
+  // flag instead; this still triggers the browser's Basic Auth flow.
+  const url = new URL(baseUrl());
+  url.searchParams.set("__dufs_checkauth", "1");
+  if (variant) url.searchParams.set(variant, "1");
+  const res = await fetch(url, { method: "POST" });
   await assertResOK(res);
   $loginBtn.classList.add("hidden");
   $logoutBtn.classList.remove("hidden");
   $userName.textContent = await res.text();
 }
 
-function logout() {
+async function logout() {
   if (!DATA.auth) return;
-  const url = baseUrl();
-  const xhr = new XMLHttpRequest();
-  xhr.open("LOGOUT", url, true, DATA.user);
-  xhr.onload = () => {
+  const url = new URL(baseUrl());
+  url.searchParams.set("__dufs_logout", "1");
+  try {
+    // A 401 is intentional here, so do not use assertResOK.
+    await fetch(url, { method: "POST" });
+  } finally {
     location.href = url;
   }
-  xhr.send();
 }
 
 /**

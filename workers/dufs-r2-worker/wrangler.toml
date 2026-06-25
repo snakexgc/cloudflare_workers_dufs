@@ -1,0 +1,60 @@
+# Use an unused Worker name. An existing asset-only Worker cannot accept R2/secrets bindings.
+name = "dufs-r2"
+main = "build/index.js"
+compatibility_date = "2026-06-22"
+workers_dev = true
+
+routes = [
+  { pattern = "dav.snakexgc.com/*", zone_name = "snakexgc.com" },
+]
+
+[build]
+command = "cargo install -q \"worker-build@^0.8\" && worker-build --release"
+
+[[r2_buckets]]
+binding = "DUFS_BUCKET"
+bucket_name = "dufs-files"
+preview_bucket_name = "dufs-files"
+
+[[durable_objects.bindings]]
+name = "MULTIPART_UPLOAD_PART"
+class_name = "MultipartUploadPart"
+
+[[durable_objects.bindings]]
+name = "OBJECT_UPLOAD"
+class_name = "ObjectUpload"
+
+[[durable_objects.bindings]]
+name = "OBJECT_COPY"
+class_name = "ObjectCopy"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["MultipartUploadPart"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ObjectCopy"]
+
+[[migrations]]
+tag = "v3"
+new_sqlite_classes = ["ObjectUpload"]
+
+[vars]
+# Set to "true" to expose the server as read-only. Credentials remain secrets.
+DUFS_READ_ONLY = "false"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1

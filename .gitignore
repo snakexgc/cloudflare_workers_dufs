@@ -1,2 +1,14 @@
 /target
+**/target/
+**/build/
+**/.wrangler/
 /.vscode
+**/.dev.vars
+**/.dev.vars.*
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+.env*
+!.env.example

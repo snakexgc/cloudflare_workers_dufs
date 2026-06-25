@@ -20,6 +20,12 @@ Dufs is a distinctive utility file server that supports static serving, uploadin
 - Support webdav
 - Easy to use with curl
 
+## Cloudflare Workers + R2
+
+The native server targets a local filesystem. A separate Rust/WebAssembly Worker target, backed by
+Cloudflare R2 and protected by Worker secrets, is available in
+[workers/dufs-r2-worker](workers/dufs-r2-worker/README.md).
+
 ## Install
 
 ### With cargo
