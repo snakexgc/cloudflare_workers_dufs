@@ -54,6 +54,7 @@ const MAX_SUBPATHS_COUNT = 1000;
 // Keep browser PUT uploads small enough for the Worker CPU budget. Larger
 // files use R2 multipart upload with 16 MiB parts.
 const MULTIPART_UPLOAD_THRESHOLD = 16 * 1024 * 1024;
+const MULTIPART_UPLOAD_CONCURRENCY = 4;
 
 const ICONS = {
   dir: `<svg height="16" viewBox="0 0 14 16" width="14"><path fill-rule="evenodd" d="M13 4H7V3c0-.66-.31-1-1-1H1c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1V5c0-.55-.45-1-1-1zM6 4H1V3h5v1z"></path></svg>`,
@@ -299,22 +300,43 @@ class Uploader {
       if (!session || !partSize) throw new Error("Invalid multipart upload session");
 
       const partCount = Math.ceil(this.file.size / partSize);
-      const parts = [];
-      for (let index = 0; index < partCount; index++) {
-        const start = index * partSize;
-        const end = Math.min(start + partSize, this.file.size);
-        const partRes = await fetch(this.multipartUrl("part", {
-          session,
-          partNumber: String(index + 1),
-        }), {
-          method: "PUT",
-          body: this.file.slice(start, end),
-        });
-        await assertResOK(partRes);
-        parts.push(await partRes.json());
-        this.uploaded = end;
-        this.multipartProgress(startedAt, index + 1, partCount);
-      }
+      const parts = new Array(partCount);
+      const controller = new AbortController();
+      let nextPartIndex = 0;
+      let completedParts = 0;
+      let uploadError = null;
+      const uploadPart = async () => {
+        while (nextPartIndex < partCount && !uploadError) {
+          const index = nextPartIndex++;
+          const start = index * partSize;
+          const end = Math.min(start + partSize, this.file.size);
+          try {
+            const partRes = await fetch(this.multipartUrl("part", {
+              session,
+              partNumber: String(index + 1),
+            }), {
+              method: "PUT",
+              body: this.file.slice(start, end),
+              signal: controller.signal,
+            });
+            await assertResOK(partRes);
+            parts[index] = await partRes.json();
+            this.uploaded += end - start;
+            completedParts++;
+            this.multipartProgress(startedAt, completedParts, partCount);
+          } catch (error) {
+            if (!uploadError) {
+              uploadError = error;
+              controller.abort();
+            }
+            throw error;
+          }
+        }
+      };
+      const workerCount = Math.min(MULTIPART_UPLOAD_CONCURRENCY, partCount);
+      const results = await Promise.allSettled(Array.from({ length: workerCount }, uploadPart));
+      const rejected = results.find(result => result.status === "rejected");
+      if (rejected) throw uploadError || rejected.reason;
 
       const completeRes = await fetch(this.multipartUrl("complete"), {
         method: "POST",
